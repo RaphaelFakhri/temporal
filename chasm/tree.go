@@ -2256,6 +2256,7 @@ func (n *Node) closeTransactionUpdateComponentTasks(
 		firstPureTask,
 		firstPureTaskNode,
 		archetypeID,
+		true,
 	)
 }
 
@@ -2565,6 +2566,7 @@ func (n *Node) closeTransactionGeneratePhysicalPureTask(
 	firstPureTask *persistencespb.ChasmComponentAttributes_Task,
 	firstTaskNode *Node,
 	archetypeID ArchetypeID,
+	updateTaskStatus bool,
 ) error {
 	if firstPureTask == nil {
 		n.backend.DeleteCHASMPureTasks(tasks.MaximumKey.FireTime)
@@ -2574,7 +2576,7 @@ func (n *Node) closeTransactionGeneratePhysicalPureTask(
 	firstPureTaskScheduledTime := firstPureTask.ScheduledTime.AsTime()
 	n.backend.DeleteCHASMPureTasks(firstPureTaskScheduledTime)
 
-	if firstPureTask.PhysicalTaskStatus == physicalTaskStatusCreated {
+	if updateTaskStatus && firstPureTask.PhysicalTaskStatus == physicalTaskStatusCreated {
 		return nil
 	}
 
@@ -2583,6 +2585,10 @@ func (n *Node) closeTransactionGeneratePhysicalPureTask(
 		VisibilityTimestamp: firstPureTaskScheduledTime,
 		ArchetypeID:         archetypeID,
 	})
+
+	if !updateTaskStatus {
+		return nil
+	}
 
 	// We need to persist the task status change as well, so add the node
 	// to the list of updated nodes.
@@ -4184,7 +4190,7 @@ func (n *Node) closeTransactionHandleTimeSkipping(immutableContext Context) erro
 	// replicated accumulated skip changed.
 	if !n.subtreeIsDirty {
 		if n.totalTimeSkippedUpdatedInPassive {
-			if err := n.regenerateTimerTasksForTimeSkipping(); err != nil {
+			if err := n.regenerateTimerTasksForTimeSkipping(true); err != nil {
 				return err
 			}
 		}
@@ -4246,17 +4252,23 @@ func (n *Node) closeTransactionHandleTimeSkipping(immutableContext Context) erro
 		tag.Bool("disabled-after-fast-forward", transition.DisabledAfterFastForward),
 	)
 	if transition.GetSkippedDuration() > 0 {
-		return n.regenerateTimerTasksForTimeSkipping()
+		return n.regenerateTimerTasksForTimeSkipping(true)
 	}
 	return nil
 }
 
-func (n *Node) regenerateTimerTasksForTimeSkipping() error {
+// regenerateTimerTasksForTimeSkipping re-emits timer tasks after the virtual-time offset changes.
+// CHASM transaction close resets task statuses so status changes are included in the system
+// mutation. Workflow executions invoke regeneration before CHASM closes and do not reset existing
+// statuses, preventing the ensuing close from emitting the same tasks again.
+func (n *Node) regenerateTimerTasksForTimeSkipping(resetTaskStatus bool) error {
 	archetypeID := n.ArchetypeID()
 	sideEffectTasks, firstPureTask, firstPureTaskNode := n.timerTasksForTimeSkipping()
 
 	for _, timerTask := range sideEffectTasks {
-		timerTask.task.PhysicalTaskStatus = physicalTaskStatusNone
+		if resetTaskStatus {
+			timerTask.task.PhysicalTaskStatus = physicalTaskStatusNone
+		}
 		timerTask.node.closeTransactionGeneratePhysicalSideEffectTask(
 			timerTask.task,
 			timerTask.nodePath,
@@ -4264,7 +4276,7 @@ func (n *Node) regenerateTimerTasksForTimeSkipping() error {
 		)
 	}
 
-	if firstPureTask != nil {
+	if resetTaskStatus && firstPureTask != nil {
 		// Pure tasks are represented by a single physical task, so we only need to
 		// regenerate that one. The earliest pure task is already
 		// physicalTaskStatusCreated from a prior transaction, and
@@ -4272,7 +4284,12 @@ func (n *Node) regenerateTimerTasksForTimeSkipping() error {
 		// Reset it so backend.AddTask re-converts the fire time for the skipped time.
 		firstPureTask.PhysicalTaskStatus = physicalTaskStatusNone
 	}
-	return n.closeTransactionGeneratePhysicalPureTask(firstPureTask, firstPureTaskNode, archetypeID)
+	return n.closeTransactionGeneratePhysicalPureTask(
+		firstPureTask,
+		firstPureTaskNode,
+		archetypeID,
+		resetTaskStatus,
+	)
 }
 
 // RegenerateTimerTasksForTimeSkipping re-stamps existing timer tasks against the current
@@ -4280,28 +4297,7 @@ func (n *Node) regenerateTimerTasksForTimeSkipping() error {
 // so tasks created during that close are emitted once with the updated offset instead of being
 // regenerated a second time here.
 func (n *Node) RegenerateTimerTasksForTimeSkipping() error {
-	archetypeID := n.ArchetypeID()
-	sideEffectTasks, firstPureTask, _ := n.timerTasksForTimeSkipping()
-
-	for _, timerTask := range sideEffectTasks {
-		timerTask.node.closeTransactionGeneratePhysicalSideEffectTask(
-			timerTask.task,
-			timerTask.nodePath,
-			archetypeID,
-		)
-	}
-
-	if firstPureTask == nil {
-		n.backend.DeleteCHASMPureTasks(tasks.MaximumKey.FireTime)
-		return nil
-	}
-	n.backend.DeleteCHASMPureTasks(firstPureTask.GetScheduledTime().AsTime())
-	n.backend.AddTasks(&tasks.ChasmTaskPure{
-		WorkflowKey:         n.backend.GetWorkflowKey(),
-		VisibilityTimestamp: firstPureTask.GetScheduledTime().AsTime(),
-		ArchetypeID:         archetypeID,
-	})
-	return nil
+	return n.regenerateTimerTasksForTimeSkipping(false)
 }
 
 type timerSideEffectTaskForTimeSkipping struct {

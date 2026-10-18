@@ -6617,7 +6617,7 @@ func (s *nodeSuite) TestRegenerateTimerTasksForTimeSkipping() {
 		})
 		s.NoError(err)
 
-		s.NoError(root.regenerateTimerTasksForTimeSkipping())
+		s.NoError(root.regenerateTimerTasksForTimeSkipping(true))
 
 		// One physical task for the timer side-effect task + one for the single earliest pure task.
 		s.Equal(2, s.nodeBackend.NumTasksAdded())
@@ -6666,7 +6666,7 @@ func (s *nodeSuite) TestRegenerateTimerTasksForTimeSkipping() {
 		})
 		s.NoError(err)
 
-		s.NoError(root.regenerateTimerTasksForTimeSkipping())
+		s.NoError(root.regenerateTimerTasksForTimeSkipping(true))
 
 		s.Equal(1, s.nodeBackend.NumTasksAdded(), "only the side-effect timer task is regenerated")
 		s.Equal(tasks.MaximumKey.FireTime, s.nodeBackend.LastDeletePureTaskCall(),
@@ -6705,7 +6705,7 @@ func (s *nodeSuite) TestRegenerateTimerTasksForTimeSkipping() {
 		})
 		s.NoError(err)
 
-		s.NoError(root.regenerateTimerTasksForTimeSkipping())
+		s.NoError(root.regenerateTimerTasksForTimeSkipping(true))
 
 		s.Equal(1, s.nodeBackend.NumTasksAdded(),
 			"the already-created earliest pure task is reset and regenerated, not short-circuited")
