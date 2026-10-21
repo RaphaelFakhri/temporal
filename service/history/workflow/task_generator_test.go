@@ -1342,6 +1342,8 @@ func TestTaskGeneratorImpl_RegenerateTimerTasksForTimeSkipping_StateMachineTimer
 	mutableState.EXPECT().GetPendingActivityInfos().Return(nil).AnyTimes()
 	mutableState.EXPECT().GetWorkflowKey().Return(tests.WorkflowKey).AnyTimes()
 	mutableState.EXPECT().GetCurrentVersion().Return(tests.Version).AnyTimes()
+	mutableState.EXPECT().HasStateMachineTimerTask(gomock.Any(), tests.Version).
+		DoAndReturn(func(candidate time.Time, _ int64) bool { return candidate.Equal(deadline) }).AnyTimes()
 	mutableState.EXPECT().HadOrHasWorkflowTask().Return(true).AnyTimes()
 
 	var capturedTasks []tasks.Task
@@ -1351,17 +1353,12 @@ func TestTaskGeneratorImpl_RegenerateTimerTasksForTimeSkipping_StateMachineTimer
 
 	taskGenerator := NewTaskGenerator(nil, mutableState, timeSkippingTestConfig(true), nil, log.NewTestLogger())
 	require.NoError(t, taskGenerator.RegenerateTimerTasksForTimeSkipping())
-	require.Len(t, capturedTasks, 2)
-	require.Equal(t, &tasks.StateMachineTimerTask{
-		WorkflowKey:         tests.WorkflowKey,
-		VisibilityTimestamp: deadline,
-		Version:             tests.Version,
-	}, capturedTasks[0])
+	require.Len(t, capturedTasks, 1)
 	require.Equal(t, &tasks.StateMachineTimerTask{
 		WorkflowKey:         tests.WorkflowKey,
 		VisibilityTimestamp: secondScheduledDeadline,
 		Version:             tests.Version,
-	}, capturedTasks[1])
+	}, capturedTasks[0])
 }
 
 func TestTaskGeneratorImpl_RegenerateTimerTasksForTimeSkipping_EdgeCases(t *testing.T) {

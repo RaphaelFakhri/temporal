@@ -755,6 +755,9 @@ func (ms *MutableStateImpl) executeTimeSkippingTransition(
 	}
 
 	tsi.SessionSkipCount++
+	// Retrying work can deliberately consume multiple skips in quick succession. The session
+	// limit is the runaway guard: once exhausted, later retries observe their normal wall-clock
+	// backoff instead of keeping the server in an unbounded skip/retry loop.
 	if tsi.SessionSkipCount >= tsi.GetConfig().GetMaxSessionSkipCount() && tsi.GetConfig().GetEnabled() {
 		tsi.Config.Enabled = false
 		ms.logger.Info("execution time skipping disabled: max session skip count reached",
@@ -775,10 +778,6 @@ func (ms *MutableStateImpl) flagSkipDurationUpdateInPassive(
 	prevTimeSkippingVT *persistencespb.VersionedTransition,
 	preAccumulatedSkipDuration time.Duration,
 ) {
-	if ms.IsWorkflow() {
-		// Workflow executions now re-stamp time-skipping timers via TaskRefresher.refreshTasksForTimeSkipping.
-		return
-	}
 	currTimeSkippingVT := ms.executionInfo.GetTimeSkippingInfo().GetLastUpdateVersionedTransition()
 	if transitionhistory.Compare(currTimeSkippingVT, prevTimeSkippingVT) <= 0 {
 		return
@@ -787,7 +786,9 @@ func (ms *MutableStateImpl) flagSkipDurationUpdateInPassive(
 		return
 	}
 	ms.chasmTree.MarkTotalTimeSkippedUpdatedInPassive()
-	ms.addTimeSkippingFastForwardTask()
+	if !ms.IsWorkflow() {
+		ms.addTimeSkippingFastForwardTask()
+	}
 }
 
 // =============================================================================

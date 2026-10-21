@@ -508,6 +508,38 @@ func (s *mutableStateSuite) TestIsWorkflowSkippable() {
 		s.False(s.mutableState.isWorkflowSkippable())
 	})
 
+	s.Run("HSMNexusOperationStarted_NotSkippable", func() {
+		s.mutableState.executionInfo.TimeSkippingInfo = &persistencespb.TimeSkippingInfo{
+			Config: &commonpb.TimeSkippingConfig{Enabled: true},
+		}
+		_, err := nexusoperations.MachineCollection(s.mutableState.HSM()).Add("op-started", nexusoperations.Operation{
+			NexusOperationInfo: &persistencespb.NexusOperationInfo{
+				State: enumsspb.NEXUS_OPERATION_STATE_STARTED,
+			},
+		})
+		s.Require().NoError(err)
+
+		s.False(s.mutableState.isWorkflowSkippable())
+	})
+
+	s.Run("SeveralHSMNexusOperationsRequireAllBackingOff", func() {
+		s.mutableState.executionInfo.TimeSkippingInfo = &persistencespb.TimeSkippingInfo{
+			Config: &commonpb.TimeSkippingConfig{Enabled: true},
+		}
+		now := s.mutableState.Now()
+		collection := nexusoperations.MachineCollection(s.mutableState.HSM())
+		_, err := collection.Add("op-backing-off", nexusoperations.Operation{NexusOperationInfo: &persistencespb.NexusOperationInfo{
+			State: enumsspb.NEXUS_OPERATION_STATE_BACKING_OFF, NextAttemptScheduleTime: timestamppb.New(now.Add(time.Hour)),
+		}})
+		s.Require().NoError(err)
+		_, err = collection.Add("op-scheduled", nexusoperations.Operation{NexusOperationInfo: &persistencespb.NexusOperationInfo{
+			State: enumsspb.NEXUS_OPERATION_STATE_SCHEDULED,
+		}})
+		s.Require().NoError(err)
+
+		s.False(s.mutableState.isWorkflowSkippable())
+	})
+
 	s.Run("CHASMNexusOperationInRetryBackoff_Skippable", func() {
 		s.mutableState.executionInfo.TimeSkippingInfo = &persistencespb.TimeSkippingInfo{
 			Config: &commonpb.TimeSkippingConfig{Enabled: true},
@@ -531,6 +563,25 @@ func (s *mutableStateSuite) TestIsWorkflowSkippable() {
 		})
 
 		s.False(s.mutableState.isWorkflowSkippable())
+	})
+
+	s.Run("MixedHSMAndCHASMOperationsUseEarliestBackoff", func() {
+		s.mutableState.executionInfo.TimeSkippingInfo = &persistencespb.TimeSkippingInfo{
+			Config: &commonpb.TimeSkippingConfig{Enabled: true},
+		}
+		now := s.mutableState.Now()
+		_, err := nexusoperations.MachineCollection(s.mutableState.HSM()).Add("hsm-op", nexusoperations.Operation{
+			NexusOperationInfo: &persistencespb.NexusOperationInfo{
+				State: enumsspb.NEXUS_OPERATION_STATE_BACKING_OFF, NextAttemptScheduleTime: timestamppb.New(now.Add(time.Hour)),
+			},
+		})
+		s.Require().NoError(err)
+		s.setChasmNexusOperation(&nexusoperationpb.OperationState{
+			Status: nexusoperationpb.OPERATION_STATUS_BACKING_OFF, NextAttemptScheduleTime: timestamppb.New(now.Add(30 * time.Minute)),
+		})
+
+		s.True(s.mutableState.isWorkflowSkippable())
+		s.Equal(now.Add(30*time.Minute), s.mutableState.findNextSkipTarget().GetTargetTime())
 	})
 
 	// conditions that won't impact the workflow skippability

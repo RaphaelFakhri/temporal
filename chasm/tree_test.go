@@ -6366,8 +6366,8 @@ func (s *nodeSuite) TestCloseTransactionHandleTimeSkipping() {
 		// Two side-effect timer tasks are each regenerated, plus the single earliest pure task
 		// (only one physical pure task is generated regardless of pure-task count) => 3 total.
 		s.Equal(3, s.nodeBackend.NumTasksAdded(), "two side-effect tasks and the earliest pure task are regenerated")
-		s.Equal(baseTime.Add(time.Hour).UTC(), s.nodeBackend.LastDeletePureTaskCall(),
-			"pure-task deletion is anchored at the earliest pure scheduled time")
+		s.Equal(tasks.MaximumKey.FireTime, s.nodeBackend.LastDeletePureTaskCall(),
+			"regeneration removes the old physical pure timer before adding the new one")
 	})
 
 	s.Run("FastForwardReached_RecordsTransitionWithoutRegeneratingTasks", func() {
@@ -6481,12 +6481,12 @@ func (s *nodeSuite) TestDefaultFindNextTargetTime() {
 
 // TestRegenerateTimerTasksForTimeSkipping verifies task regeneration: every timer side-effect task
 // is re-created (non-timer ones are skipped), only the single earliest pure task across the tree
-// gets a physical pure task, and pure-task deletion is anchored at the earliest scheduled time (or
-// the maximum key when there are no pure tasks).
+// gets a physical pure task, and regeneration deletes the old physical pure-task row before
+// adding the current earliest task.
 func (s *nodeSuite) TestRegenerateTimerTasksForTimeSkipping() {
 	baseTime := time.Date(2027, 1, 1, 12, 0, 0, 0, time.UTC)
 
-	s.Run("PreCloseRegenerationDoesNotDirtyTree", func() {
+	s.Run("DefersRegenerationUntilClose", func() {
 		s.nodeBackend = &MockNodeBackend{}
 		s.nodeBackend.HandleNow = s.timeSource.Now
 		s.timeSource.Update(baseTime)
@@ -6523,17 +6523,19 @@ func (s *nodeSuite) TestRegenerateTimerTasksForTimeSkipping() {
 
 		s.NoError(root.RegenerateTimerTasksForTimeSkipping())
 
-		s.Equal(2, s.nodeBackend.NumTasksAdded())
-		s.Equal(baseTime.Add(time.Hour).UTC(), s.nodeBackend.LastDeletePureTaskCall())
-		s.False(root.IsDirty(), "pre-close timer re-stamping must not create a new CHASM mutation")
+		s.Equal(0, s.nodeBackend.NumTasksAdded(), "regeneration must wait for close-time task validation")
+		s.False(root.IsDirty(), "requesting timer re-stamping must not create a replicated CHASM mutation")
 
-		// Tasks added during the ensuing CHASM close were not visible to regeneration and
-		// therefore must each be emitted exactly once by CloseTransaction.
+		// The existing side-effect timer is invalidated during close while a new one is added.
+		// Deferred regeneration must only see the finalized logical task set.
 		mutableContext := NewMutableContext(context.Background(), root)
 		component, err := root.Component(mutableContext, ComponentRef{})
 		s.NoError(err)
 		s.testLibrary.mockSideEffectTaskHandler.EXPECT().
-			Validate(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(true, nil).AnyTimes()
+			Validate(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+			DoAndReturn(func(_ Context, _ any, _ TaskInvocation, task *TestSideEffectTask) (bool, error) {
+				return len(task.Data) > 0, nil
+			}).AnyTimes()
 		mutableContext.AddTask(
 			component,
 			TaskAttributes{ScheduledTime: baseTime.Add(3 * time.Hour)},
@@ -6549,8 +6551,10 @@ func (s *nodeSuite) TestRegenerateTimerTasksForTimeSkipping() {
 
 		_, err = root.CloseTransaction(context.Background(), true)
 		s.NoError(err)
-		s.Equal(4, s.nodeBackend.NumTasksAdded(),
-			"two existing timers are re-stamped and two newly added timers are emitted once")
+		s.Equal(2, s.nodeBackend.NumTasksAdded(),
+			"the invalid old timer is omitted and each new surviving timer is emitted once")
+		s.Equal(tasks.MaximumKey.FireTime, s.nodeBackend.LastDeletePureTaskCall(),
+			"regeneration removes the old pure timer even when its old wall-clock time is later")
 	})
 
 	s.Run("RegeneratesSideEffectTimersAndEarliestPureTask", func() {
@@ -6617,12 +6621,12 @@ func (s *nodeSuite) TestRegenerateTimerTasksForTimeSkipping() {
 		})
 		s.NoError(err)
 
-		s.NoError(root.regenerateTimerTasksForTimeSkipping(true))
+		s.NoError(root.regenerateTimerTasksForTimeSkipping())
 
 		// One physical task for the timer side-effect task + one for the single earliest pure task.
 		s.Equal(2, s.nodeBackend.NumTasksAdded())
-		s.Equal(baseTime.Add(time.Hour).UTC(), s.nodeBackend.LastDeletePureTaskCall(),
-			"pure-task deletion is anchored at the earliest pure scheduled time")
+		s.Equal(tasks.MaximumKey.FireTime, s.nodeBackend.LastDeletePureTaskCall(),
+			"regeneration deletes every previously emitted pure timer")
 
 		rootAttrs := root.serializedNode.Metadata.GetComponentAttributes()
 		s.Equal(physicalTaskStatusCreated, rootAttrs.SideEffectTasks[0].PhysicalTaskStatus,
@@ -6666,7 +6670,7 @@ func (s *nodeSuite) TestRegenerateTimerTasksForTimeSkipping() {
 		})
 		s.NoError(err)
 
-		s.NoError(root.regenerateTimerTasksForTimeSkipping(true))
+		s.NoError(root.regenerateTimerTasksForTimeSkipping())
 
 		s.Equal(1, s.nodeBackend.NumTasksAdded(), "only the side-effect timer task is regenerated")
 		s.Equal(tasks.MaximumKey.FireTime, s.nodeBackend.LastDeletePureTaskCall(),
@@ -6705,12 +6709,12 @@ func (s *nodeSuite) TestRegenerateTimerTasksForTimeSkipping() {
 		})
 		s.NoError(err)
 
-		s.NoError(root.regenerateTimerTasksForTimeSkipping(true))
+		s.NoError(root.regenerateTimerTasksForTimeSkipping())
 
 		s.Equal(1, s.nodeBackend.NumTasksAdded(),
 			"the already-created earliest pure task is reset and regenerated, not short-circuited")
-		s.Equal(baseTime.Add(time.Hour).UTC(), s.nodeBackend.LastDeletePureTaskCall(),
-			"pure-task deletion is anchored at the earliest pure scheduled time")
+		s.Equal(tasks.MaximumKey.FireTime, s.nodeBackend.LastDeletePureTaskCall(),
+			"regeneration deletes every previously emitted pure timer")
 
 		rootAttrs := root.serializedNode.Metadata.GetComponentAttributes()
 		s.Equal(physicalTaskStatusCreated, rootAttrs.PureTasks[0].PhysicalTaskStatus,
@@ -6782,7 +6786,7 @@ func (s *nodeSuite) TestCloseTransaction_MarkTotalTimeSkippedUpdatedInPassive() 
 		root := newTree()
 
 		root.MarkTotalTimeSkippedUpdatedInPassive()
-		s.True(root.totalTimeSkippedUpdatedInPassive)
+		s.True(root.regenerateTimerTasksOnClose)
 
 		_, err := root.CloseTransaction(context.Background(), true)
 		s.Require().NoError(err)
@@ -6806,7 +6810,7 @@ func (s *nodeSuite) TestCloseTransaction_MarkTotalTimeSkippedUpdatedInPassive() 
 		s.Equal(physicalTaskStatusCreated, rootAttrs.SideEffectTasks[0].PhysicalTaskStatus)
 		s.Equal(physicalTaskStatusCreated, rootAttrs.PureTasks[0].PhysicalTaskStatus)
 
-		s.False(root.totalTimeSkippedUpdatedInPassive,
+		s.False(root.regenerateTimerTasksOnClose,
 			"the flag is reset after the transaction closes")
 	})
 }

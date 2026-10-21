@@ -1062,8 +1062,8 @@ func (r *TaskGeneratorImpl) RegenerateTimerTasksForTimeSkipping() error {
 	}
 
 	// Task regeneration: mutableState.AddTask will adapt virtual time to wall time.
-	// WorkflowTask and HSM(only nexusoperations) timer tasks won't be regenerated
-	// because time skipping pauses when there is in-flight work. Activity retry
+	// WorkflowTask timer tasks won't be regenerated because time skipping pauses when
+	// there is in-flight work. Activity retry
 	// timers are the exception: an activity in retry backoff does not block skipping,
 	// so its retry timer must be re-stamped against the new accumulated skip (see (5)).
 	//
@@ -1168,10 +1168,15 @@ func (r *TaskGeneratorImpl) RegenerateTimerTasksForTimeSkipping() error {
 		if !timerGroup.GetScheduled() {
 			continue
 		}
+		deadline := timerGroup.GetDeadline().AsTime()
+		version := r.mutableState.GetCurrentVersion()
+		if r.mutableState.HasStateMachineTimerTask(deadline, version) {
+			continue
+		}
 		r.mutableState.AddTasks(&tasks.StateMachineTimerTask{
 			WorkflowKey:         r.mutableState.GetWorkflowKey(),
-			VisibilityTimestamp: timerGroup.GetDeadline().AsTime(),
-			Version:             r.mutableState.GetCurrentVersion(),
+			VisibilityTimestamp: deadline,
+			Version:             version,
 		})
 	}
 
